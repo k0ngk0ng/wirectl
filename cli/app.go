@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -57,18 +58,8 @@ func (a App) Run(ctx context.Context, args []string) error {
 		return cmd.Run(ctx, args[1:])
 	}
 	if a.PluginPrefix != "" && commandName.MatchString(args[0]) {
-		plugin := a.PluginPrefix + args[0]
-		path, err := exec.LookPath(plugin)
-		if self, selfErr := os.Executable(); selfErr == nil {
-			if resolved, resolveErr := filepath.EvalSymlinks(self); resolveErr == nil {
-				self = resolved
-			}
-			sibling := filepath.Join(filepath.Dir(self), plugin)
-			if st, statErr := os.Stat(sibling); statErr == nil && st.Mode().IsRegular() && st.Mode()&0111 != 0 {
-				path, err = sibling, nil
-			}
-		}
-		if err != nil {
+		path := resolvePlugin(a.PluginPrefix, args[0])
+		if path == "" {
 			return fmt.Errorf("command %q is not installed; install %s%s and place it on PATH", args[0], a.PluginPrefix, args[0])
 		}
 		cmd := exec.CommandContext(ctx, path, args[1:]...)
@@ -103,11 +94,11 @@ func plugins(prefix string) []string {
 			continue
 		}
 		for _, entry := range entries {
-			name := strings.TrimPrefix(entry.Name(), prefix)
-			if name == entry.Name() || !commandName.MatchString(name) {
+			name, ok := pluginCommandName(prefix, entry.Name())
+			if !ok {
 				continue
 			}
-			if st, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil && st.Mode().IsRegular() && st.Mode()&0111 != 0 {
+			if isPluginExecutable(filepath.Join(dir, entry.Name())) {
 				found[name] = true
 			}
 		}
@@ -119,6 +110,84 @@ func plugins(prefix string) []string {
 	sort.Strings(names)
 	return names
 }
+
+// resolvePlugin resolves a command plugin by giving the host's directory
+// precedence over PATH. Windows executables conventionally carry an .exe
+// suffix, while Unix relies on executable permission bits.
+func resolvePlugin(prefix, command string) string {
+	self, err := os.Executable()
+	if err != nil {
+		self = ""
+	}
+	return resolvePluginFrom(prefix, command, self)
+}
+
+// resolvePluginFrom is split out so resolution order can be tested without
+// having to place a fixture beside the running test binary.
+func resolvePluginFrom(prefix, command, self string) string {
+	plugin := prefix + command
+	candidates := pluginCandidates(plugin)
+	if self != "" {
+		self = absolutePath(self)
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			self = resolved
+		}
+		for _, candidate := range candidates {
+			path := filepath.Join(filepath.Dir(self), candidate)
+			if isPluginExecutable(path) {
+				return absolutePath(path)
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		path, err := exec.LookPath(candidate)
+		if err != nil || !isPluginExecutable(path) {
+			continue
+		}
+		return absolutePath(path)
+	}
+	return ""
+}
+
+func pluginCandidates(plugin string) []string {
+	if runtime.GOOS == "windows" {
+		return []string{plugin + ".exe", plugin}
+	}
+	return []string{plugin, plugin + ".exe"}
+}
+
+func pluginCommandName(prefix, filename string) (string, bool) {
+	name := strings.TrimPrefix(filename, prefix)
+	if name == filename {
+		return "", false
+	}
+	if strings.EqualFold(filepath.Ext(name), ".exe") {
+		name = name[:len(name)-len(filepath.Ext(name))]
+	}
+	if !commandName.MatchString(name) {
+		return "", false
+	}
+	return name, true
+}
+
+func isPluginExecutable(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Ext(path), ".exe")
+	}
+	return st.Mode()&0111 != 0
+}
+
+func absolutePath(path string) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		return absolute
+	}
+	return path
+}
+
 func ExitCode(err error) int {
 	if err == nil {
 		return 0

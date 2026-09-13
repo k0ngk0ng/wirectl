@@ -1,6 +1,6 @@
 # wirectl
 
-Lightweight command host and shared Go CLI library. macOS and Linux.
+Lightweight command host and shared Go CLI library. macOS, Linux, and Windows.
 
 Each repository releases a `wirectl-<command>` executable. Install it on `PATH`
 alongside `wirectl`; `wirectl <command> ...` forwards arguments and standard

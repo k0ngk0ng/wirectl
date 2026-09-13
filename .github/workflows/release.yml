@@ -23,21 +23,29 @@ jobs:
           set -eu
           VERSION=${TAG#v}
           mkdir -p dist
-          for TARGET in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+          for TARGET in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64; do
             GOOS=${TARGET%-*}
             GOARCH=${TARGET#*-}
             export GOOS GOARCH
             mkdir -p ".cache/$TARGET/bin"
-            CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o ".cache/$TARGET/bin/wirectl" ./cmd/wirectl
+            BINARY=wirectl
+            if [ "$GOOS" = windows ]; then
+              BINARY=wirectl.exe
+            fi
+            CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o ".cache/$TARGET/bin/$BINARY" ./cmd/wirectl
             cp README.md ".cache/$TARGET/"
-            tar -czf "dist/wirectl-$VERSION-$TARGET.tar.gz" -C ".cache/$TARGET" bin README.md
+            if [ "$GOOS" = windows ]; then
+              (cd ".cache/$TARGET" && zip -q -r "$GITHUB_WORKSPACE/dist/wirectl-$VERSION-$TARGET.zip" bin README.md)
+            else
+              tar -czf "dist/wirectl-$VERSION-$TARGET.tar.gz" -C ".cache/$TARGET" bin README.md
+            fi
           done
           cd dist
-          sha256sum ./*.tar.gz > SHA256SUMS
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
       - name: Publish private repository release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/* --verify-tag --draft --title "$TAG" --notes 'Standalone wirectl hosts for macOS and Linux. The download distribution also includes this host.'
+          gh release create "$TAG" dist/* --verify-tag --draft --title "$TAG" --notes 'Standalone wirectl hosts for macOS, Linux, and Windows. The download distribution also includes this host.'
           gh release edit "$TAG" --draft=false
