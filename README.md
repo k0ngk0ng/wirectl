@@ -7,6 +7,9 @@ alongside `wirectl`; `wirectl <command> ...` forwards arguments and standard
 streams to that executable and preserves its exit status. No plugin registry,
 dynamic linking, or shared runtime is required.
 
+On Windows the host discovers `wirectl-<command>.exe`; Unix hosts require the
+exact `wirectl-<command>` name with executable permission.
+
 The `wire-download` repository supplies `wirectl-download`:
 
 ```sh

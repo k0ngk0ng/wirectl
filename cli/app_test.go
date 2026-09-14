@@ -40,15 +40,20 @@ func TestHelpAndUnknown(t *testing.T) {
 	}
 }
 
-func TestPluginCommandNameAcceptsExeSuffix(t *testing.T) {
+func TestPluginCommandNamePlatformRules(t *testing.T) {
+	exeOK := runtime.GOOS == "windows"
+	exeWant := ""
+	if exeOK {
+		exeWant = "probe"
+	}
 	tests := []struct {
 		filename string
 		want     string
 		ok       bool
 	}{
 		{filename: "wirectl-probe", want: "probe", ok: true},
-		{filename: "wirectl-probe.exe", want: "probe", ok: true},
-		{filename: "wirectl-probe.EXE", want: "probe", ok: true},
+		{filename: "wirectl-probe.exe", want: exeWant, ok: exeOK},
+		{filename: "wirectl-probe.EXE", want: exeWant, ok: exeOK},
 		{filename: "wirectl-probe.exe.bak", ok: false},
 		{filename: "wirectl-probe/extra", ok: false},
 	}
@@ -80,21 +85,28 @@ func TestResolvePluginPrefersHostDirectory(t *testing.T) {
 	}
 }
 
-func TestResolvePluginFindsExeOnPath(t *testing.T) {
+func TestResolvePluginFindsNativePluginOnPath(t *testing.T) {
 	dir := t.TempDir()
-	exe := filepath.Join(dir, "wirectl-probe.exe")
-	writePluginFixture(t, exe)
+	plugin := filepath.Join(dir, "wirectl-probe")
+	if runtime.GOOS == "windows" {
+		plugin += ".exe"
+	}
+	writePluginFixture(t, plugin)
 	t.Setenv("PATH", dir)
 
 	got := resolvePluginFrom("wirectl-", "probe", "")
-	if got != exe {
-		t.Fatalf("resolvePluginFrom returned %q, want %q", got, exe)
+	if got != plugin {
+		t.Fatalf("resolvePluginFrom returned %q, want %q", got, plugin)
 	}
 }
 
-func TestPluginsListsExeWithoutExtension(t *testing.T) {
+func TestPluginsListsNativePluginWithoutExtension(t *testing.T) {
 	dir := t.TempDir()
-	writePluginFixture(t, filepath.Join(dir, "wirectl-probe.exe"))
+	plugin := filepath.Join(dir, "wirectl-probe")
+	if runtime.GOOS == "windows" {
+		plugin += ".exe"
+	}
+	writePluginFixture(t, plugin)
 	t.Setenv("PATH", dir)
 
 	for _, name := range plugins("wirectl-") {

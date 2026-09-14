@@ -153,7 +153,10 @@ func pluginCandidates(plugin string) []string {
 	if runtime.GOOS == "windows" {
 		return []string{plugin + ".exe", plugin}
 	}
-	return []string{plugin, plugin + ".exe"}
+	// Unix command names are exact and executable permission is part of the
+	// plugin contract.  Do not silently make a Windows-named file a Unix
+	// plugin: that would change discovery behavior for existing installations.
+	return []string{plugin}
 }
 
 func pluginCommandName(prefix, filename string) (string, bool) {
@@ -161,7 +164,7 @@ func pluginCommandName(prefix, filename string) (string, bool) {
 	if name == filename {
 		return "", false
 	}
-	if strings.EqualFold(filepath.Ext(name), ".exe") {
+	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(name), ".exe") {
 		name = name[:len(name)-len(filepath.Ext(name))]
 	}
 	if !commandName.MatchString(name) {

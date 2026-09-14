@@ -1,51 +1,179 @@
 name: Release
+
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
+
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+
 jobs:
-  release:
+  verify:
+    name: Verify native targets
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Build release archives
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      GOCACHE: ${{ github.workspace }}/.cache/go-build
+      GOMODCACHE: ${{ github.workspace }}/.cache/go-mod
+      GOPATH: ${{ github.workspace }}/.cache/go
+      GOTMPDIR: ${{ github.workspace }}/.cache/tmp
+      TMPDIR: ${{ github.workspace }}/.cache/tmp
+      TEMP: ${{ github.workspace }}/.cache/tmp
+      TMP: ${{ github.workspace }}/.cache/tmp
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Confirm the checked out commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Prepare repository-local Go paths
+        shell: bash
+        run: mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOPATH" "$GOTMPDIR" "$GITHUB_WORKSPACE/.cache/release"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build all release targets
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tags must be stable SemVer vMAJOR.MINOR.PATCH: $TAG" >&2
+            exit 2
+          fi
+          version="${TAG#v}"
+          rm -rf dist .cache/release/targets
+          mkdir -p dist .cache/release/targets
+          for target in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64; do
+            goos="${target%-*}"
+            goarch="${target#*-}"
+            stage=".cache/release/targets/$target"
+            mkdir -p "$stage/bin"
+            binary="wirectl"
+            archive="dist/wirectl-$version-$target.tar.gz"
+            if [[ "$goos" == windows ]]; then
+              binary="wirectl.exe"
+              archive="dist/wirectl-$version-$target.zip"
+            fi
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -trimpath -buildvcs=false \
+                -ldflags="-s -w -X main.version=$version" \
+                -o "$stage/bin/$binary" ./cmd/wirectl
+            cp README.md "$stage/"
+            if [[ "$goos" == windows ]]; then
+              (cd "$stage" && zip -q -r "$GITHUB_WORKSPACE/$archive" bin README.md)
+            else
+              tar -czf "$archive" -C "$stage" bin README.md
+            fi
+          done
+          (
+            cd dist
+            sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          )
+          test "$(wc -l < dist/SHA256SUMS)" -eq 5
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wirectl-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_CONFIG_DIR: ${{ github.workspace }}/.cache/gh
+      XDG_CACHE_HOME: ${{ github.workspace }}/.cache
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.2'
-          cache: false
-      - run: go test -race ./... && go vet ./...
-      - name: Build standalone hosts
-        env:
-          TAG: ${{ github.ref_name }}
+          ref: ${{ github.sha }}
+      - name: Confirm the checked out commit
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wirectl-${{ github.sha }}
+          path: dist
+      - name: Verify release checksums
+        shell: bash
         run: |
-          set -eu
-          VERSION=${TAG#v}
-          mkdir -p dist
-          for TARGET in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-amd64; do
-            GOOS=${TARGET%-*}
-            GOARCH=${TARGET#*-}
-            export GOOS GOARCH
-            mkdir -p ".cache/$TARGET/bin"
-            BINARY=wirectl
-            if [ "$GOOS" = windows ]; then
-              BINARY=wirectl.exe
-            fi
-            CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o ".cache/$TARGET/bin/$BINARY" ./cmd/wirectl
-            cp README.md ".cache/$TARGET/"
-            if [ "$GOOS" = windows ]; then
-              (cd ".cache/$TARGET" && zip -q -r "$GITHUB_WORKSPACE/dist/wirectl-$VERSION-$TARGET.zip" bin README.md)
-            else
-              tar -czf "dist/wirectl-$VERSION-$TARGET.tar.gz" -C ".cache/$TARGET" bin README.md
-            fi
+          set -euo pipefail
+          test -s dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 4
+          test "$(find dist -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq 1
+      - name: Attest release artifacts
+        id: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Verify release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
+          SOURCE_DIGEST: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GH_CONFIG_DIR" "$XDG_CACHE_HOME"
+          test -s "$BUNDLE_PATH"
+          mapfile -d '' assets < <(find dist -maxdepth 1 -type f -print0 | sort -z)
+          if ((${#assets[@]} == 0)); then
+            echo 'no release assets were produced' >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            gh attestation verify "$asset" \
+              --bundle "$BUNDLE_PATH" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW" \
+              --source-digest "$SOURCE_DIGEST" \
+              --deny-self-hosted-runners
           done
-          cd dist
-          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
-      - name: Publish private repository release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+        shell: bash
         run: |
-          gh release create "$TAG" dist/* --verify-tag --draft --title "$TAG" --notes 'Standalone wirectl hosts for macOS, Linux, and Windows. The download distribution also includes this host.'
-          gh release edit "$TAG" --draft=false
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.cache/tmp"
+          notes_file="$(mktemp "$GITHUB_WORKSPACE/.cache/tmp/wirectl-release-notes.XXXXXX")"
+          cleanup() { rm -f "$notes_file"; }
+          trap cleanup EXIT
+          cat > "$notes_file" <<EOF
+          wirectl $TAG
+
+          Lightweight command host for independently released command plugins.
+          The Windows amd64 archive contains wirectl.exe; Unix archives contain
+          the native wirectl executable. Install wirectl-connect beside the host
+          to use the connect command.
+
+          This release was built by the verified native CI workflow for the
+          tagged commit. SHA256SUMS and GitHub artifact attestations are included.
+
+          Verify provenance with:
+            gh attestation verify <asset> --repo $GITHUB_REPOSITORY
+          EOF
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file "$notes_file"
